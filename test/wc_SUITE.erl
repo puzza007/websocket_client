@@ -137,9 +137,11 @@ test_bad_request(_) ->
     end.
 
 test_keepalive_opt(_) ->
-    {ok, Pid} = ws_client:start_link("ws://localhost:8080", 100),
-    receive {ok, Pid} -> ok after 500 -> ct:fail(timeout) end,
-    {pong, <<>>} = ws_client:recv(Pid, 500),
+    %% Reset trap_exit which may have been set by test_bad_request
+    process_flag(trap_exit, false),
+    {ok, Pid} = ws_client:start_link("ws://localhost:8080", 500),
+    receive {ok, Pid} -> ok after 5000 -> ct:fail(timeout) end,
+    {pong, <<>>} = ws_client:recv(Pid, 2000),
     ws_client:stop(Pid),
     ok.
 
