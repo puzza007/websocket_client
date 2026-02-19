@@ -558,7 +558,10 @@ handle_websocket_frame(Data, #context{}=Context0) ->
                                       buffer=BufferN}};
         {close, _Reason, WSReqN} ->
             {next_state, disconnected, Context#context{wsreq=WSReqN,
-                                                       buffer= <<>>}}
+                                                       buffer= <<>>}};
+        {error, Reason} ->
+            _ = encode_and_send({close, <<1002:16>>}, WSReq),
+            disconnect({error, Reason}, Context)
     end.
 
 

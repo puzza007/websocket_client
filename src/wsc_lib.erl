@@ -92,6 +92,10 @@ unpack_frame(Data) ->
 decode_frame(WSReq, Frame) when is_binary(Frame) ->
     case unpack_frame(Frame) of
         {incomplete, Data} -> {recv, WSReq, Data};
+        {ok, _Fin, RSV, _OpCode, _Len, _Payload} when RSV =/= 0 ->
+            {error, {invalid_rsv, RSV}};
+        {ok, 0, 0, OpCode, _Len, _Payload} when OpCode >= 8 ->
+            {error, {fragmented_control_frame, OpCode}};
         {ok, 0, 0, OpCode, Len, Payload} ->
             WSReq1 = set_continuation_if_empty(WSReq, OpCode),
             WSReq2 = websocket_req:fin(0, WSReq1),
@@ -129,7 +133,9 @@ decode_frame(WSReq, Opcode, Len, Data, Buffer) ->
     Fin = websocket_req:fin(WSReq),
     << Payload:Len/binary, Rest/bits >> = Data,
     FullPayload = << Buffer/binary, Payload/binary >>,
-    OpcodeName = websocket_req:opcode_to_name(Opcode),
+    case websocket_req:opcode_to_name(Opcode) of
+        {error, _} = Err -> Err;
+        OpcodeName ->
     case OpcodeName of
         close when byte_size(FullPayload) >= 2 ->
             << CodeBin:2/binary, ClosePayload/binary >> = FullPayload,
@@ -142,6 +148,8 @@ decode_frame(WSReq, Opcode, Len, Data, Buffer) ->
                          _ -> {remote, Code, ClosePayload}
                      end,
             {close, Reason, WSReq};
+        close when byte_size(FullPayload) == 1 ->
+            {error, {invalid_close_payload, 1}};
         close ->
             {close, {remote, <<>>}, WSReq};
         %% Non-control continuation frame
@@ -159,11 +167,14 @@ decode_frame(WSReq, Opcode, Len, Data, Buffer) ->
             {frame, {ContinuationOpcodeName, DefragPayload}, WSReq2, Rest};
         _ ->
             {frame, {OpcodeName, FullPayload}, WSReq, Rest}
+    end
     end.
 
 %% @doc Encodes the data with a header (including a masking key) and
 %% masks the data
 -spec encode_frame(websocket_req:frame()) -> binary().
+encode_frame({close, Code, Payload}) when is_integer(Code) ->
+    encode_frame({close, <<Code:16, (iolist_to_binary(Payload))/binary>>});
 encode_frame({Type, Payload}) ->
     Opcode = websocket_req:name_to_opcode(Type),
     Len = iolist_size(Payload),

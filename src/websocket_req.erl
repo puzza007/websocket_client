@@ -41,14 +41,16 @@ new(Protocol, Host, Port, Path, Transport, Key) ->
 
 
 %% @doc Mapping from opcode to opcode name
--spec opcode_to_name(opcode()) ->
-    atom().
+-spec opcode_to_name(0..15) ->
+    atom() | {error, {reserved_opcode, 3..15}}.
 opcode_to_name(0) -> continuation;
 opcode_to_name(1) -> text;
 opcode_to_name(2) -> binary;
+opcode_to_name(N) when N >= 3, N =< 7 -> {error, {reserved_opcode, N}};
 opcode_to_name(8) -> close;
 opcode_to_name(9) -> ping;
-opcode_to_name(10) -> pong.
+opcode_to_name(10) -> pong;
+opcode_to_name(N) when N >= 11, N =< 15 -> {error, {reserved_opcode, N}}.
 
 %% @doc Mapping from opcode to opcode name
 -spec name_to_opcode(atom()) ->
