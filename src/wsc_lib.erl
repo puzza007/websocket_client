@@ -180,7 +180,7 @@ decode_frame(WSReq, Opcode, Len, Data, Buffer) ->
         _ when Opcode < 8, Continuation =/= undefined, Fin == 1 ->
             DefragPayload = << Continuation/binary, FullPayload/binary >>,
             ContinuationOpcodeName = websocket_req:opcode_to_name(ContinuationOpcode),
-            case validate_utf8_if_text(ContinuationOpcode, DefragPayload, final) of
+            case validate_utf8_final(ContinuationOpcode, Continuation, FullPayload) of
                 false ->
                     {error, 1007, <<"Invalid UTF-8 in text message">>};
                 true ->
@@ -200,7 +200,7 @@ decode_frame(WSReq, Opcode, Len, Data, Buffer) ->
 
 %% @doc Encodes the data with a header (including a masking key) and
 %% masks the data
--spec encode_frame(websocket_req:frame()) -> binary().
+-spec encode_frame(websocket_req:frame()) -> iodata().
 encode_frame({close, Code, Reason}) when is_integer(Code) ->
     encode_frame({close, <<Code:16, Reason/binary>>});
 encode_frame({Type, Payload}) ->
@@ -211,7 +211,7 @@ encode_frame({Type, Payload}) ->
     << MaskingKey:32 >> = MaskingKeyBin,
     Header = << 1:1, 0:3, Opcode:4, 1:1, BinLen/bits, MaskingKeyBin/bits >>,
     MaskedPayload = mask_payload(MaskingKey, Payload),
-    << Header/binary, MaskedPayload/binary >>;
+    [Header, MaskedPayload];
 encode_frame(Type) when is_atom(Type) ->
     encode_frame({Type, <<>>}).
 
@@ -299,8 +299,12 @@ utf8_scan_back(Bin, Pos, MinPos) ->
         _    -> Pos
     end.
 
-%% @doc Validate UTF-8 for final fragments — incomplete is not acceptable.
-validate_utf8_if_text(1, Bin, final) ->
-    validate_utf8(Bin) =:= true;
-validate_utf8_if_text(_, _Bin, final) ->
+%% @doc Validate the final fragment of a continuation sequence.
+%% Only checks the tail from the last codepoint boundary in OldCont plus NewData,
+%% since incremental validation already covered earlier bytes. Rejects incomplete.
+validate_utf8_final(1, OldCont, NewData) ->
+    TailStart = utf8_last_boundary(OldCont),
+    Tail = binary_part(OldCont, TailStart, byte_size(OldCont) - TailStart),
+    validate_utf8(<< Tail/binary, NewData/binary >>) =:= true;
+validate_utf8_final(_, _OldCont, _NewData) ->
     true.

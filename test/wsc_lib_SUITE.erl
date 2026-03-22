@@ -55,7 +55,7 @@ prop_single_frame_codec() ->
     WSReq = wsreq(),
     ?FORALL({Type, Payload}, ws_frame_gen(),
             begin
-                Encoded = wsc_lib:encode_frame({Type, Payload}),
+                Encoded = iolist_to_binary(wsc_lib:encode_frame({Type, Payload})),
                 case wsc_lib:decode_frame(WSReq, Encoded) of
                     {frame, {Type, Payload}, #websocket_req{}, <<>>} -> true;
                     _ -> false
@@ -69,7 +69,7 @@ prop_batched_binaries() ->
     WSReq = wsreq(),
     ?FORALL(Messages, non_empty(list(ws_frame_gen())),
             begin
-                Encoded = [wsc_lib:encode_frame(Msg) || Msg <- Messages],
+                Encoded = [iolist_to_binary(wsc_lib:encode_frame(Msg)) || Msg <- Messages],
                 Batch = list_to_binary(Encoded),
                 {frames, Decoded, _WSReq1} = maybe_frames(WSReq, Batch, []),
                 Messages == Decoded
