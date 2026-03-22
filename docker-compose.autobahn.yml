@@ -1,0 +1,9 @@
+services:
+  autobahn:
+    image: crossbario/autobahn-testsuite
+    ports:
+      - "9001:9001"
+    volumes:
+      - ./test/autobahn/config:/config
+      - ./test/autobahn/reports:/reports
+    command: ["wstest", "-m", "fuzzingserver", "-s", "/config/fuzzingserver.json"]

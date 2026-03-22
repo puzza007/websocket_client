@@ -26,15 +26,22 @@ create_auth_header(basic, User, Pass) ->
 -spec create_handshake(websocket_req:req(), [{string(), string()}]) ->
     iolist().
 create_handshake(WSReq, ExtraHeaders) ->
-    [Path, Host, Key] = websocket_req:get([path, host, key], WSReq),
+    [Path, Host, Port, Protocol, Key] =
+        websocket_req:get([path, host, port, protocol, key], WSReq),
+    HostHeader = host_header(Host, Port, Protocol),
     ["GET ", Path, " HTTP/1.1\r\n"
-     "Host: ", Host, "\r\n"
+     "Host: ", HostHeader, "\r\n"
      "Connection: Upgrade\r\n"
      "Sec-WebSocket-Version: 13\r\n"
      "Sec-WebSocket-Key: ", Key, "\r\n"
      "Upgrade: websocket\r\n",
      [ [Header, ": ", Value, "\r\n"] || {Header, Value} <- ExtraHeaders],
      "\r\n"].
+
+%% RFC 6455 Section 4.1: Include port in Host header for non-default ports.
+host_header(Host, 80, ws)   -> Host;
+host_header(Host, 443, wss) -> Host;
+host_header(Host, Port, _)  -> Host ++ ":" ++ integer_to_list(Port).
 
 %% @doc Validate handshake response challenge
 -spec validate_handshake(HandshakeResponse :: binary(), Key :: binary()) ->
