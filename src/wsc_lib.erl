@@ -97,8 +97,16 @@ unpack_frame(Data) ->
 
 %% @doc Start or continue continuation payload with length less than 126 bytes
 decode_frame(WSReq, Frame) when is_binary(Frame) ->
+    Continuation = websocket_req:continuation(WSReq),
     case unpack_frame(Frame) of
         {incomplete, Data} -> {recv, WSReq, Data};
+        %% RFC 6455 Section 5.4: Control frames must not be fragmented.
+        {ok, 0, _RSV, OpCode, _Len, _Payload} when OpCode >= 8 ->
+            {error, 1002, <<"Control frames must not be fragmented">>};
+        %% RFC 6455 Section 5.4: New data frame while continuation in progress.
+        {ok, _Fin, 0, OpCode, _Len, _Payload}
+          when OpCode > 0, OpCode < 8, Continuation =/= undefined ->
+            {error, 1002, <<"Expected continuation opcode 0">>};
         {ok, 0, 0, OpCode, Len, Payload} ->
             WSReq1 = set_continuation_if_empty(WSReq, OpCode),
             WSReq2 = websocket_req:fin(0, WSReq1),
@@ -141,29 +149,51 @@ decode_frame(WSReq, Opcode, Len, Data, Buffer) ->
         close when byte_size(FullPayload) >= 2 ->
             << CodeBin:2/binary, ClosePayload/binary >> = FullPayload,
             Code = binary:decode_unsigned(CodeBin),
-            Reason = case Code of
-                         1000 -> {normal, ClosePayload};
-                         1002 -> {error, badframe, ClosePayload};
-                         1007 -> {error, badencoding, ClosePayload};
-                         1011 -> {error, handler, ClosePayload};
-                         _ -> {remote, Code, ClosePayload}
-                     end,
-            {close, Reason, WSReq};
+            case validate_utf8(ClosePayload) of
+                false ->
+                    {error, 1007, <<"Invalid UTF-8 in close reason">>};
+                _ ->
+                    Reason = case Code of
+                                 1000 -> {normal, ClosePayload};
+                                 1002 -> {error, badframe, ClosePayload};
+                                 1007 -> {error, badencoding, ClosePayload};
+                                 1011 -> {error, handler, ClosePayload};
+                                 _ -> {remote, Code, ClosePayload}
+                             end,
+                    {close, Reason, WSReq}
+            end;
         close ->
             {close, {remote, <<>>}, WSReq};
         %% Non-control continuation frame
         _ when Opcode < 8, Continuation =/= undefined, Fin == 0 ->
-            %% Append to previously existing continuation payloads and continue
             Continuation1 = << Continuation/binary, FullPayload/binary >>,
-            WSReq1 = websocket_req:continuation(Continuation1, WSReq),
-            decode_frame(WSReq1, Rest);
+            case validate_utf8_incremental(ContinuationOpcode, Continuation, FullPayload) of
+                false ->
+                    {error, 1007, <<"Invalid UTF-8 in text fragment">>};
+                _ ->
+                    WSReq1 = websocket_req:continuation(Continuation1, WSReq),
+                    WSReq2 = websocket_req:remaining(undefined, WSReq1),
+                    WSReq3 = websocket_req:opcode(undefined, WSReq2),
+                    decode_frame(WSReq3, Rest)
+            end;
         %% Terminate continuation frame sequence with non-control frame
         _ when Opcode < 8, Continuation =/= undefined, Fin == 1 ->
             DefragPayload = << Continuation/binary, FullPayload/binary >>,
-            WSReq1 = websocket_req:continuation(undefined, WSReq),
-            WSReq2 = websocket_req:continuation_opcode(undefined, WSReq1),
             ContinuationOpcodeName = websocket_req:opcode_to_name(ContinuationOpcode),
-            {frame, {ContinuationOpcodeName, DefragPayload}, WSReq2, Rest};
+            case validate_utf8_if_text(ContinuationOpcode, DefragPayload, final) of
+                false ->
+                    {error, 1007, <<"Invalid UTF-8 in text message">>};
+                true ->
+                    WSReq1 = websocket_req:continuation(undefined, WSReq),
+                    WSReq2 = websocket_req:continuation_opcode(undefined, WSReq1),
+                    {frame, {ContinuationOpcodeName, DefragPayload}, WSReq2, Rest}
+            end;
+        %% Single unfragmented text frame — validate UTF-8
+        _ when Opcode == 1, Fin == 1 ->
+            case validate_utf8(FullPayload) of
+                true -> {frame, {text, FullPayload}, WSReq, Rest};
+                _ -> {error, 1007, <<"Invalid UTF-8 in text message">>}
+            end;
         _ ->
             {frame, {OpcodeName, FullPayload}, WSReq, Rest}
     end.
@@ -171,6 +201,8 @@ decode_frame(WSReq, Opcode, Len, Data, Buffer) ->
 %% @doc Encodes the data with a header (including a masking key) and
 %% masks the data
 -spec encode_frame(websocket_req:frame()) -> binary().
+encode_frame({close, Code, Reason}) when is_integer(Code) ->
+    encode_frame({close, <<Code:16, Reason/binary>>});
 encode_frame({Type, Payload}) ->
     Opcode = websocket_req:name_to_opcode(Type),
     Len = iolist_size(Payload),
@@ -232,3 +264,43 @@ set_continuation_if_empty(WSReq, Opcode) ->
 -spec generate_ws_key() -> binary().
 generate_ws_key() ->
     base64:encode(crypto:strong_rand_bytes(16)).
+
+%% @doc Validate that a binary is valid UTF-8.
+%% Returns true, false, or incomplete (valid so far but truncated mid-codepoint).
+-spec validate_utf8(binary()) -> true | false | incomplete.
+validate_utf8(<<>>) -> true;
+validate_utf8(Bin) ->
+    case unicode:characters_to_binary(Bin) of
+        Bin -> true;
+        {incomplete, _, _} -> incomplete;
+        {error, _, _} -> false
+    end.
+
+%% @doc Validate only the new data in a continuation fragment (O(n) per fragment
+%% instead of O(n²) over the whole message). Finds the last codepoint boundary
+%% in OldCont and validates from there to catch split multi-byte sequences.
+validate_utf8_incremental(1, OldCont, NewData) ->
+    TailStart = utf8_last_boundary(OldCont),
+    Tail = binary_part(OldCont, TailStart, byte_size(OldCont) - TailStart),
+    validate_utf8(<< Tail/binary, NewData/binary >>) =/= false;
+validate_utf8_incremental(_, _OldCont, _NewData) ->
+    true.
+
+%% @doc Find the byte offset of the last UTF-8 codepoint start in Bin.
+%% Scans backward over continuation bytes (10xxxxxx) to find the start byte.
+utf8_last_boundary(<<>>) -> 0;
+utf8_last_boundary(Bin) ->
+    utf8_scan_back(Bin, byte_size(Bin) - 1, max(0, byte_size(Bin) - 4)).
+
+utf8_scan_back(_Bin, Pos, MinPos) when Pos < MinPos -> MinPos;
+utf8_scan_back(Bin, Pos, MinPos) ->
+    case binary:at(Bin, Pos) bsr 6 of
+        2#10 -> utf8_scan_back(Bin, Pos - 1, MinPos);
+        _    -> Pos
+    end.
+
+%% @doc Validate UTF-8 for final fragments — incomplete is not acceptable.
+validate_utf8_if_text(1, Bin, final) ->
+    validate_utf8(Bin) =:= true;
+validate_utf8_if_text(_, _Bin, final) ->
+    true.

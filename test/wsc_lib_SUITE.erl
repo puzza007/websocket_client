@@ -53,10 +53,10 @@ t_prop_single_frame_codec(_) ->
         ct:fail(proper:counterexample()).
 prop_single_frame_codec() ->
     WSReq = wsreq(),
-    ?FORALL({Type, Payload}, {oneof([text, binary, ping, pong]), binary()},
+    ?FORALL({Type, Payload}, ws_frame_gen(),
             begin
                 Encoded = wsc_lib:encode_frame({Type, Payload}),
-                case wsc_lib:decode_frame(WSReq, Encoded) of 
+                case wsc_lib:decode_frame(WSReq, Encoded) of
                     {frame, {Type, Payload}, #websocket_req{}, <<>>} -> true;
                     _ -> false
                 end
@@ -67,7 +67,7 @@ t_prop_batched_binaries(_) ->
         ct:fail(proper:counterexample()).
 prop_batched_binaries() ->
     WSReq = wsreq(),
-    ?FORALL(Messages, non_empty(list({oneof([text, binary, ping, pong]), binary()})),
+    ?FORALL(Messages, non_empty(list(ws_frame_gen())),
             begin
                 Encoded = [wsc_lib:encode_frame(Msg) || Msg <- Messages],
                 Batch = list_to_binary(Encoded),
@@ -82,9 +82,9 @@ maybe_frames(WSReq0, Payload, Frames) ->
     % | {close, Reason :: term(), websocket_req:req()}.
     case wsc_lib:decode_frame(WSReq0, Payload) of
         {close, Reason, WSReq1} ->
-            % Anything that might be left is discarded
-            % But anything received before is processed
             {frames, lists:reverse([{close, Reason} | Frames]), WSReq1};
+        {error, Code, Reason} ->
+            {frames, lists:reverse([{error, Code, Reason} | Frames]), WSReq0};
         {recv, WSReq1, Incomplete} ->
             {frames, lists:reverse([{recv, Incomplete} | Frames]), WSReq1};
         {frame, Frame, WSReq1, <<>>} ->
@@ -94,6 +94,25 @@ maybe_frames(WSReq0, Payload, Frames) ->
     end.
 
 
+
+%% Generator for valid WebSocket frames.
+%% Text frames must contain valid UTF-8; other types use arbitrary binaries.
+ws_frame_gen() ->
+    oneof([{text, utf8_binary()},
+           {binary, binary()},
+           {ping, binary()},
+           {pong, binary()}]).
+
+utf8_binary() ->
+    ?LET(Chars, list(utf8_char()),
+         unicode:characters_to_binary(Chars)).
+
+utf8_char() ->
+    oneof([choose(16#20, 16#7E),        %% printable ASCII
+           choose(16#A0, 16#D7FF),       %% BMP (excluding surrogates)
+           choose(16#E000, 16#FFFD),     %% BMP (rest)
+           choose(16#10000, 16#10FFFF)   %% supplementary planes
+          ]).
 
 wsreq() ->
     {Protocol, Host, Port, Path} = {tcp, "localhost", 8080, "/"},
